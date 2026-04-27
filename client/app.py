@@ -60,18 +60,19 @@ if submitted:
             response = requests.post(url, json=parsed_payload, headers=headers, timeout=10)
             st.success(f"Response: {response.status_code} {response.reason}")
 
-            st.subheader("Request")
-            with st.expander("Headers sent", expanded=False):
+            st.markdown("**Request**")
+            with st.expander("Headers sent", expanded=True):
                 st.json(dict(headers))
             with st.expander("Payload sent", expanded=True):
                 st.json(parsed_payload)
 
-            st.subheader("Response")
+            st.markdown("**Response**")
             content_type = response.headers.get("Content-Type", "")
-            if "application/json" in content_type:
-                st.json(response.json())
-            else:
-                st.text(response.text)
+            with st.expander("Response body", expanded=True):
+                if "application/json" in content_type:
+                    st.json(response.json())
+                else:
+                    st.text(response.text)
 
         except requests.exceptions.ConnectionError:
             st.error("Connection failed. Check the Webhook URL and ensure the server is running.")
