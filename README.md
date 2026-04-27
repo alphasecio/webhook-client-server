@@ -10,7 +10,11 @@ A minimal webhook client-server demo built with Node.js/Express (server) and Str
 
 The **server** receives HTTP POST requests on a parameterised route (`/webhook/:event`), optionally verifies an HMAC-SHA256 signature, logs the event type and payload, and returns the received data as JSON.
 
+![Webhook server](/server/webhook-server.png)
+
 The **client** is a Streamlit UI for sending webhook requests — specify a URL, event type, JSON payload, and optional shared secret. If a secret is provided, the payload is signed automatically before sending.
+
+![Webhook client](/client/webhook-client.png)
 
 Together they demonstrate the core webhook pattern: a sender signs a payload, a receiver verifies the signature, and both sides use a shared secret without transmitting it directly.
 
