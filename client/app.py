@@ -1,8 +1,15 @@
-import hmac
 import hashlib
+import hmac
 import json
+import os
+from urllib.parse import urlsplit
+
 import requests
 import streamlit as st
+
+DEFAULT_URL = os.environ.get("WEBHOOK_URL", "http://webhook-server.railway.internal:3000/webhook/test")
+TIMEOUT_SECONDS = 10
+MAX_RESPONSE_BYTES = 1_000_000
 
 st.set_page_config(page_title="Webhook Client", page_icon="🪝")
 st.subheader("Webhook Client")
@@ -11,7 +18,7 @@ st.caption("Send signed or unsigned HTTP POST requests to any webhook endpoint."
 with st.form("webhook_form"):
     url = st.text_input(
         "Webhook URL",
-        value="http://webhook-server.railway.internal/webhook/test",
+        value=DEFAULT_URL,
         help="The full URL of the webhook endpoint to send the request to.",
     )
     event_type = st.text_input(
@@ -32,51 +39,74 @@ with st.form("webhook_form"):
     )
     submitted = st.form_submit_button("Submit")
 
+
+def read_limited(response):
+    """Read at most MAX_RESPONSE_BYTES of the body; return (text, truncated)."""
+    body = response.raw.read(MAX_RESPONSE_BYTES + 1, decode_content=True)
+    truncated = len(body) > MAX_RESPONSE_BYTES
+    text = body[:MAX_RESPONSE_BYTES].decode(response.encoding or "utf-8", errors="replace")
+    return text, truncated
+
+
 if submitted:
-    if not url.strip():
-        st.error("Please provide a Webhook URL.")
-    else:
-        try:
-            parsed_payload = json.loads(payload)
-        except json.JSONDecodeError:
-            st.error("Invalid JSON payload. Please check your input.")
-            st.stop()
+    url = url.strip()
+    if urlsplit(url).scheme not in ("http", "https") or not urlsplit(url).netloc:
+        st.error("Please provide a valid http(s) Webhook URL.")
+        st.stop()
 
-        headers = {"Content-Type": "application/json"}
+    try:
+        parsed_payload = json.loads(payload)
+    except json.JSONDecodeError:
+        st.error("Invalid JSON payload. Please check your input.")
+        st.stop()
 
-        if event_type.strip():
-            headers["X-Event-Type"] = event_type.strip()
+    # Sign and send the exact same bytes. Compact separators match JavaScript's JSON.stringify.
+    body = json.dumps(parsed_payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if event_type.strip():
+        headers["X-Event-Type"] = event_type.strip()
+    if secret.strip():
+        sig = hmac.new(secret.strip().encode("utf-8"), body, hashlib.sha256).hexdigest()
+        headers["X-Webhook-Signature"] = f"sha256={sig}"
 
-        if secret.strip():
-            body = json.dumps(parsed_payload)
-            sig = hmac.new(
-                secret.strip().encode(),
-                body.encode(),
-                hashlib.sha256,
-            ).hexdigest()
-            headers["X-Webhook-Signature"] = f"sha256={sig}"
-
-        try:
-            response = requests.post(url, json=parsed_payload, headers=headers, timeout=10)
-            st.success(f"Response: {response.status_code} {response.reason}")
-
-            st.markdown("**Request**")
-            with st.expander("Headers sent", expanded=True):
-                st.json(dict(headers))
-            with st.expander("Payload sent", expanded=True):
-                st.json(parsed_payload)
-
-            st.markdown("**Response**")
+    try:
+        with requests.post(
+            url, data=body, headers=headers, timeout=TIMEOUT_SECONDS, allow_redirects=False, stream=True
+        ) as response:
+            text, truncated = read_limited(response)
+            status = f"Response: {response.status_code} {response.reason}"
+            location = response.headers.get("Location")
             content_type = response.headers.get("Content-Type", "")
-            with st.expander("Response body", expanded=True):
-                if "application/json" in content_type:
-                    st.json(response.json())
-                else:
-                    st.text(response.text)
+    except requests.exceptions.Timeout:
+        st.error(f"Request timed out after {TIMEOUT_SECONDS} seconds.")
+        st.stop()
+    except requests.exceptions.ConnectionError:
+        st.error("Connection failed. Check the Webhook URL and ensure the server is running.")
+        st.stop()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        st.error(f"Request failed: {e}")
+        st.stop()
 
-        except requests.exceptions.ConnectionError:
-            st.error("Connection failed. Check the Webhook URL and ensure the server is running.")
-        except requests.exceptions.Timeout:
-            st.error("Request timed out after 10 seconds.")
-        except Exception as e:
-            st.error(f"Unexpected error: {str(e)}")
+    if 200 <= response.status_code < 300:
+        st.success(status)
+    else:
+        st.warning(status)
+    if location:
+        st.info(f"Redirect to {location} was not followed.")
+
+    st.markdown("**Request**")
+    with st.expander("Headers sent", expanded=True):
+        st.json(headers)
+    with st.expander("Payload sent", expanded=True):
+        st.json(parsed_payload)
+
+    st.markdown("**Response**")
+    with st.expander("Response body", expanded=True):
+        try:
+            if "json" not in content_type or truncated:
+                raise ValueError
+            st.json(json.loads(text))
+        except ValueError:
+            st.text(text or "(empty)")
+        if truncated:
+            st.caption(f"Response truncated to {MAX_RESPONSE_BYTES:,} bytes.")
